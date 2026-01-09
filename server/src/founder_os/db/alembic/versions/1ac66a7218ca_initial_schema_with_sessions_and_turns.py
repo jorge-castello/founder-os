@@ -32,7 +32,7 @@ def upgrade() -> None:
     sa.Column('id', sa.String(length=36), nullable=False),
     sa.Column('session_id', sa.String(length=36), nullable=False),
     sa.Column('user_content', sa.Text(), nullable=True),
-    sa.Column('assistant_content', sa.Text(), nullable=True),
+    sa.Column('assistant_blocks', sa.Text(), nullable=True),
     sa.Column('created_at', sa.DateTime(), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
     sa.ForeignKeyConstraint(['session_id'], ['sessions.id'], ),
     sa.PrimaryKeyConstraint('id')

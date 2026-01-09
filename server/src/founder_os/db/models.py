@@ -33,7 +33,7 @@ class Turn(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     session_id: Mapped[str] = mapped_column(String(36), ForeignKey("sessions.id"))
     user_content: Mapped[str | None] = mapped_column(Text)
-    assistant_content: Mapped[str | None] = mapped_column(Text)
+    assistant_blocks: Mapped[str | None] = mapped_column(Text)  # JSON array of content blocks
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     session: Mapped["Session"] = relationship(back_populates="turns")

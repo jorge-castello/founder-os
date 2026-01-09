@@ -16,9 +16,26 @@ const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
 interface Turn {
   id: string;
   user_content: string | null;
-  assistant_content: string | null;
+  assistant_blocks: string | null; // JSON array of content blocks
   created_at: string;
 }
+
+// Block types from backend
+interface TextBlock {
+  type: "text";
+  text: string;
+}
+
+interface ToolUseBlock {
+  type: "tool_use";
+  id: string;
+  name: string;
+  input: Record<string, unknown>;
+  result?: unknown;
+  is_error?: boolean;
+}
+
+type ContentBlock = TextBlock | ToolUseBlock;
 
 interface Session {
   id: string;
@@ -44,10 +61,29 @@ const convertTurnToMessages = (turn: Turn): ThreadMessageLike[] => {
     });
   }
 
-  if (turn.assistant_content) {
+  if (turn.assistant_blocks) {
+    // Parse blocks JSON and convert to assistant-ui format
+    const blocks: ContentBlock[] = JSON.parse(turn.assistant_blocks);
+    const content: ThreadMessageLike["content"] = blocks.map((block) => {
+      if (block.type === "text") {
+        return { type: "text" as const, text: block.text };
+      } else {
+        // tool_use block
+        return {
+          type: "tool-call" as const,
+          toolCallId: block.id,
+          toolName: block.name,
+          args: block.input as Record<string, string | number | boolean | null>,
+          argsText: JSON.stringify(block.input, null, 2),
+          result: block.result as string | number | boolean | null | Record<string, unknown> | undefined,
+          isError: block.is_error,
+        };
+      }
+    });
+
     messages.push({
       role: "assistant",
-      content: [{ type: "text", text: turn.assistant_content }],
+      content,
       id: `${turn.id}-assistant`,
       createdAt: new Date(turn.created_at),
       status: { type: "complete", reason: "stop" },

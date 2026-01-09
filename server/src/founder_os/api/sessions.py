@@ -33,7 +33,7 @@ class SessionUpdate(BaseModel):
 class TurnResponse(BaseModel):
     id: str
     user_content: str | None
-    assistant_content: str | None
+    assistant_blocks: str | None  # JSON array of content blocks
     created_at: datetime
 
     class Config:
@@ -62,7 +62,7 @@ class TurnCreate(BaseModel):
 class TurnMessageResponse(BaseModel):
     id: str
     user_content: str
-    assistant_content: str
+    assistant_blocks: str  # JSON array of content blocks
 
 
 # --- Routes ---
@@ -146,19 +146,19 @@ async def create_turn(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Create turn immediately with user content (assistant_content will be updated later)
+    # Create turn immediately with user content (assistant_blocks will be updated later)
     turn = Turn(
         id=str(uuid4()),
         session_id=session_id,
         user_content=data.content,
-        assistant_content=None,
+        assistant_blocks=None,
     )
     db.add(turn)
     await db.commit()
     await db.refresh(turn)
 
     # Send to Claude (pass stored claude_session_id for resume if available)
-    assistant_content, claude_session_id = await session_manager.send_message(
+    assistant_blocks, claude_session_id = await session_manager.send_message(
         session_id, data.content, session.claude_session_id
     )
 
@@ -166,8 +166,8 @@ async def create_turn(
     if claude_session_id and session.claude_session_id != claude_session_id:
         session.claude_session_id = claude_session_id
 
-    # Update turn with assistant response
-    turn.assistant_content = assistant_content
+    # Update turn with assistant response (blocks JSON)
+    turn.assistant_blocks = assistant_blocks
     await db.commit()
     await db.refresh(turn)
 
@@ -230,8 +230,13 @@ async def generate_title(
     for turn in session.turns[:3]:  # Use first 3 turns max
         if turn.user_content:
             conversation.append(f"User: {turn.user_content[:200]}")
-        if turn.assistant_content:
-            conversation.append(f"Assistant: {turn.assistant_content[:200]}")
+        if turn.assistant_blocks:
+            # Extract text from blocks
+            blocks = json.loads(turn.assistant_blocks)
+            text_parts = [b["text"] for b in blocks if b.get("type") == "text"]
+            assistant_text = " ".join(text_parts)[:200]
+            if assistant_text:
+                conversation.append(f"Assistant: {assistant_text}")
 
     conversation_text = "\n".join(conversation)
 

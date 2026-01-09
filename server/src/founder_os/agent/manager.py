@@ -1,6 +1,7 @@
 """Session manager for Claude SDK clients."""
 
 import asyncio
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -114,7 +115,7 @@ class SessionManager:
         self, session_id: str, prompt: str, claude_session_id: str | None = None
     ) -> tuple[str, str]:
         """
-        Send a message and get the full text response.
+        Send a message and get the full structured response.
 
         Args:
             session_id: Our internal session ID
@@ -128,16 +129,19 @@ class SessionManager:
         - tool_result: ToolResultBlock (tool output)
 
         Returns:
-            Tuple of (response_text, claude_session_id) where claude_session_id
-            is Claude's internal session ID that should be stored for future resume.
+            Tuple of (blocks_json, claude_session_id) where blocks_json is a JSON
+            array of content blocks (text and tool_use with results) in order.
         """
         client = await self.get_client(session_id, claude_session_id)
 
         await client.query(prompt)
 
-        # Track accumulated text per block ID to compute deltas
+        # Track blocks in order for persistence
+        blocks: list[dict] = []
+        # Map tool_use_id to block index for adding results later
+        tool_use_index: dict[str, int] = {}
+        # Track accumulated text per block ID
         accumulated_text: dict[str, str] = {}
-        final_text_parts: list[str] = []
         result_session_id: str | None = None
 
         # Use receive_messages() instead of receive_response() to get partial updates
@@ -162,9 +166,10 @@ class SessionManager:
             if isinstance(message, AssistantMessage):
                 for block in message.content:
                     if isinstance(block, TextBlock):
-                        # Store final accumulated text (don't publish delta here, StreamEvent handles it)
                         block_id = getattr(block, 'id', 'default')
                         accumulated_text[block_id] = block.text
+                        # Add or update text block
+                        blocks.append({"type": "text", "text": block.text})
 
                     elif isinstance(block, ToolUseBlock):
                         await event_stream.publish(
@@ -176,6 +181,15 @@ class SessionManager:
                                 "input": block.input,
                             },
                         )
+                        # Add tool_use block and track index
+                        tool_use_index[block.id] = len(blocks)
+                        blocks.append({
+                            "type": "tool_use",
+                            "id": block.id,
+                            "name": block.name,
+                            "input": block.input,
+                        })
+
                     elif isinstance(block, ToolResultBlock):
                         await event_stream.publish(
                             session_id,
@@ -186,21 +200,26 @@ class SessionManager:
                                 "is_error": block.is_error,
                             },
                         )
+                        # Add result to corresponding tool_use block
+                        if block.tool_use_id in tool_use_index:
+                            idx = tool_use_index[block.tool_use_id]
+                            blocks[idx]["result"] = block.content
+                            blocks[idx]["is_error"] = block.is_error
+
             elif isinstance(message, ResultMessage):
                 result_session_id = message.session_id
                 # ResultMessage indicates completion - break out of loop
                 break
 
-        # Emit final complete text and collect for return
+        # Emit final complete text
         for block_id, text in accumulated_text.items():
-            final_text_parts.append(text)
             await event_stream.publish(
                 session_id,
                 "text",
                 {"content": text},
             )
 
-        return "".join(final_text_parts), result_session_id or ""
+        return json.dumps(blocks), result_session_id or ""
 
     async def cleanup_expired(self) -> int:
         """Remove expired clients. Returns count removed."""
