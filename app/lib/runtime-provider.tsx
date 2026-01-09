@@ -1,11 +1,12 @@
 "use client";
 
-import { ReactNode, useState, useCallback, useEffect } from "react";
+import { ReactNode, useState, useCallback, useEffect, useMemo } from "react";
 import {
   useExternalStoreRuntime,
   ThreadMessageLike,
   AppendMessage,
   AssistantRuntimeProvider,
+  ExternalStoreThreadListAdapter,
 } from "@assistant-ui/react";
 
 // Backend API configuration
@@ -49,7 +50,7 @@ const convertTurnToMessages = (turn: Turn): ThreadMessageLike[] => {
       content: [{ type: "text", text: turn.assistant_content }],
       id: `${turn.id}-assistant`,
       createdAt: new Date(turn.created_at),
-      status: { type: "complete" },
+      status: { type: "complete", reason: "stop" },
       metadata: {},
     });
   }
@@ -58,6 +59,12 @@ const convertTurnToMessages = (turn: Turn): ThreadMessageLike[] => {
 };
 
 // API functions
+async function fetchSessions(): Promise<Session[]> {
+  const response = await fetch(`${API_BASE}/sessions`);
+  if (!response.ok) throw new Error("Failed to fetch sessions");
+  return response.json();
+}
+
 async function createSession(): Promise<Session> {
   const response = await fetch(`${API_BASE}/sessions`, {
     method: "POST",
@@ -87,38 +94,28 @@ async function sendMessage(
   return response.json();
 }
 
-export function FounderOSRuntimeProvider({
+// Inner component that only renders when we have session data
+function RuntimeProviderInner({
   children,
-}: Readonly<{
+  sessionId,
+  sessions,
+  setSessions,
+  messages,
+  setMessages,
+  loadSession,
+}: {
   children: ReactNode;
-}>) {
-  const [sessionId, setSessionId] = useState<string | null>(null);
-  const [messages, setMessages] = useState<ThreadMessageLike[]>([]);
+  sessionId: string;
+  sessions: Session[];
+  setSessions: React.Dispatch<React.SetStateAction<Session[]>>;
+  messages: ThreadMessageLike[];
+  setMessages: React.Dispatch<React.SetStateAction<ThreadMessageLike[]>>;
+  loadSession: (id: string) => Promise<void>;
+}) {
   const [isRunning, setIsRunning] = useState(false);
-
-  // Initialize session on mount
-  useEffect(() => {
-    const initSession = async () => {
-      const session = await createSession();
-      setSessionId(session.id);
-
-      // If session has turns, load them
-      if (session.turns && session.turns.length > 0) {
-        const loadedMessages = session.turns.flatMap(convertTurnToMessages);
-        setMessages(loadedMessages);
-      }
-    };
-
-    initSession();
-  }, []);
 
   const onNew = useCallback(
     async (message: AppendMessage) => {
-      if (!sessionId) {
-        console.error("No session ID available");
-        return;
-      }
-
       // Extract text content
       const textContent = message.content.find((c) => c.type === "text");
       if (!textContent || textContent.type !== "text") {
@@ -148,35 +145,128 @@ export function FounderOSRuntimeProvider({
         // Replace temp message with real messages from the turn
         setMessages((prev) => {
           // Remove temp message
-          const withoutTemp = prev.filter(
-            (m) => m.id !== tempUserMessage.id
-          );
+          const withoutTemp = prev.filter((m) => m.id !== tempUserMessage.id);
           // Add the real messages
           return [...withoutTemp, ...convertTurnToMessages(turn)];
         });
       } catch (error) {
         console.error("Failed to send message:", error);
         // Remove optimistic message on error
-        setMessages((prev) =>
-          prev.filter((m) => m.id !== tempUserMessage.id)
-        );
+        setMessages((prev) => prev.filter((m) => m.id !== tempUserMessage.id));
         throw error;
       } finally {
         setIsRunning(false);
       }
     },
-    [sessionId]
+    [sessionId, setMessages]
+  );
+
+  // Memoize threads array to prevent reference changes on every render
+  const threads = useMemo(
+    () =>
+      sessions.map((s) => ({
+        id: s.id,
+        threadId: s.id,
+        title: s.title || "New Chat",
+        status: "regular" as const,
+      })),
+    [sessions]
+  );
+
+  // Memoize thread list adapter
+  const threadListAdapter: ExternalStoreThreadListAdapter = useMemo(
+    () => ({
+      threadId: sessionId,
+      threads,
+      archivedThreads: [],
+
+      onSwitchToNewThread: async () => {
+        const newSession = await createSession();
+        setSessions((prev) => [newSession, ...prev]);
+        setMessages([]);
+        await loadSession(newSession.id);
+      },
+
+      onSwitchToThread: async (threadId: string) => {
+        await loadSession(threadId);
+      },
+    }),
+    [sessionId, threads, setSessions, setMessages, loadSession]
   );
 
   const runtime = useExternalStoreRuntime({
     isRunning,
     messages,
     onNew,
+    convertMessage: (message) => message,
+    adapters: {
+      threadList: threadListAdapter,
+    },
   });
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
       {children}
     </AssistantRuntimeProvider>
+  );
+}
+
+export function FounderOSRuntimeProvider({
+  children,
+}: Readonly<{
+  children: ReactNode;
+}>) {
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [sessions, setSessions] = useState<Session[]>([]);
+  const [messages, setMessages] = useState<ThreadMessageLike[]>([]);
+
+  // Load session messages
+  const loadSession = useCallback(async (id: string) => {
+    const session = await fetchSessionDetail(id);
+    setSessionId(id);
+    if (session.turns && session.turns.length > 0) {
+      setMessages(session.turns.flatMap(convertTurnToMessages));
+    } else {
+      setMessages([]);
+    }
+  }, []);
+
+  // Initialize: load sessions list, create or select first session
+  useEffect(() => {
+    const init = async () => {
+      const existingSessions = await fetchSessions();
+      setSessions(existingSessions);
+
+      if (existingSessions.length > 0) {
+        // Load most recent session
+        await loadSession(existingSessions[0].id);
+      } else {
+        // Create first session
+        const newSession = await createSession();
+        setSessions([newSession]);
+        setSessionId(newSession.id);
+        setMessages([]);
+      }
+    };
+
+    init();
+  }, [loadSession]);
+
+  // Don't render until we have a session and it's in the sessions list
+  if (!sessionId || sessions.length === 0 || !sessions.some(s => s.id === sessionId)) {
+    return null;
+  }
+
+  return (
+    <RuntimeProviderInner
+      sessionId={sessionId}
+      sessions={sessions}
+      setSessions={setSessions}
+      messages={messages}
+      setMessages={setMessages}
+      loadSession={loadSession}
+    >
+      {children}
+    </RuntimeProviderInner>
   );
 }
