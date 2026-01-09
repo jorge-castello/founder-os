@@ -150,8 +150,43 @@ function RuntimeProviderInner({
       setMessages((prev) => [...prev, assistantMessage]);
       setIsRunning(true);
 
-      // Track accumulated text for streaming
+      // Track accumulated text and tool calls for streaming
       let accumulatedText = "";
+      interface ToolCallState {
+        toolCallId: string;
+        toolName: string;
+        args: Record<string, string | number | boolean | null>;
+        argsText: string;
+        result?: string | number | boolean | null | Record<string, unknown>;
+        isError?: boolean;
+      }
+      const toolCalls: Map<string, ToolCallState> = new Map();
+
+      // Helper to build content array from accumulated state
+      const buildContent = (): ThreadMessageLike["content"] => {
+        const content: Array<
+          | { type: "text"; text: string }
+          | { readonly type: "tool-call"; readonly toolCallId: string; readonly toolName: string; readonly args: Record<string, string | number | boolean | null>; readonly argsText: string; readonly result?: string | number | boolean | null | Record<string, unknown>; readonly isError?: boolean }
+        > = [];
+
+        if (accumulatedText) {
+          content.push({ type: "text", text: accumulatedText });
+        }
+
+        for (const tc of toolCalls.values()) {
+          content.push({
+            type: "tool-call" as const,
+            toolCallId: tc.toolCallId,
+            toolName: tc.toolName,
+            args: tc.args,
+            argsText: tc.argsText,
+            result: tc.result,
+            isError: tc.isError,
+          } as const);
+        }
+
+        return content.length > 0 ? content : [{ type: "text" as const, text: "" }];
+      };
 
       try {
         // Subscribe to SSE stream BEFORE sending message
@@ -164,14 +199,53 @@ function RuntimeProviderInner({
           const data = JSON.parse(event.data);
           accumulatedText += data.content;
 
-          // Update assistant message with new text
+          // Update assistant message with new content
           setMessages((prev) =>
             prev.map((m) =>
               m.id === assistantMessageId
-                ? {
-                    ...m,
-                    content: [{ type: "text", text: accumulatedText }],
-                  }
+                ? { ...m, content: buildContent() }
+                : m
+            )
+          );
+        });
+
+        // Handle tool call events from backend
+        eventSource.addEventListener("tool_call", (event) => {
+          const data = JSON.parse(event.data);
+          // data: { id, name, input }
+          const input = data.input || {};
+          toolCalls.set(data.id, {
+            toolCallId: data.id,
+            toolName: data.name,
+            args: input as Record<string, string | number | boolean | null>,
+            argsText: JSON.stringify(input, null, 2),
+          });
+
+          // Update assistant message with tool call
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantMessageId
+                ? { ...m, content: buildContent() }
+                : m
+            )
+          );
+        });
+
+        // Handle tool result events from backend
+        eventSource.addEventListener("tool_result", (event) => {
+          const data = JSON.parse(event.data);
+          // data: { tool_use_id, content, is_error }
+          const existing = toolCalls.get(data.tool_use_id);
+          if (existing) {
+            existing.result = data.content;
+            existing.isError = data.is_error;
+          }
+
+          // Update assistant message with tool result
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantMessageId
+                ? { ...m, content: buildContent() }
                 : m
             )
           );
@@ -179,13 +253,14 @@ function RuntimeProviderInner({
 
         eventSource.addEventListener("text", (event) => {
           const data = JSON.parse(event.data);
+          accumulatedText = data.content;
           // Final text - update and mark complete
           setMessages((prev) =>
             prev.map((m) =>
               m.id === assistantMessageId
                 ? {
                     ...m,
-                    content: [{ type: "text", text: data.content }],
+                    content: buildContent(),
                     status: { type: "complete", reason: "stop" },
                   }
                 : m
