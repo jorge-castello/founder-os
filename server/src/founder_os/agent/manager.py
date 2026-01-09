@@ -5,7 +5,16 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions, AssistantMessage, TextBlock
+from claude_agent_sdk import (
+    ClaudeSDKClient,
+    ClaudeAgentOptions,
+    AssistantMessage,
+    TextBlock,
+    ToolUseBlock,
+    ToolResultBlock,
+)
+
+from founder_os.stream import event_stream
 
 # Repo root (founder-os/)
 REPO_ROOT = Path(__file__).parent.parent.parent.parent.parent
@@ -90,6 +99,11 @@ class SessionManager:
         """
         Send a message and get the full text response.
 
+        Emits events to Redis stream as Claude responds:
+        - text: TextBlock content
+        - tool_call: ToolUseBlock (tool name and input)
+        - tool_result: ToolResultBlock (tool output)
+
         Returns the concatenated text from all TextBlocks.
         """
         client = await self.get_client(session_id)
@@ -102,6 +116,31 @@ class SessionManager:
                 for block in message.content:
                     if isinstance(block, TextBlock):
                         text_parts.append(block.text)
+                        await event_stream.publish(
+                            session_id,
+                            "text",
+                            {"content": block.text},
+                        )
+                    elif isinstance(block, ToolUseBlock):
+                        await event_stream.publish(
+                            session_id,
+                            "tool_call",
+                            {
+                                "id": block.id,
+                                "name": block.name,
+                                "input": block.input,
+                            },
+                        )
+                    elif isinstance(block, ToolResultBlock):
+                        await event_stream.publish(
+                            session_id,
+                            "tool_result",
+                            {
+                                "tool_use_id": block.tool_use_id,
+                                "content": block.content,
+                                "is_error": block.is_error,
+                            },
+                        )
 
         return "".join(text_parts)
 
