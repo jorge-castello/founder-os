@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from founder_os.db import Session, get_session
+from founder_os.agent import session_manager
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
@@ -44,6 +45,16 @@ class SessionResponse(BaseModel):
 
 class SessionDetailResponse(SessionResponse):
     turns: list[TurnResponse]
+
+
+class TurnCreate(BaseModel):
+    content: str
+
+
+class TurnMessageResponse(BaseModel):
+    id: str
+    user_content: str
+    assistant_content: str
 
 
 # --- Routes ---
@@ -92,3 +103,27 @@ async def get_session_detail(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     return session
+
+
+@router.post("/{session_id}/turns", response_model=TurnMessageResponse)
+async def create_turn(
+    session_id: str,
+    data: TurnCreate,
+    db: AsyncSession = Depends(get_session),
+) -> dict:
+    """Send a message and get Claude's response."""
+    # Verify session exists
+    result = await db.execute(select(Session).where(Session.id == session_id))
+    session = result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Send to Claude and get response
+    assistant_content = await session_manager.send_message(session_id, data.content)
+
+    # Return response (persistence added in Step 6)
+    return {
+        "id": str(uuid4()),
+        "user_content": data.content,
+        "assistant_content": assistant_content,
+    }
