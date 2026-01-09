@@ -38,6 +38,8 @@ const convertTurnToMessages = (turn: Turn): ThreadMessageLike[] => {
       content: [{ type: "text", text: turn.user_content }],
       id: `${turn.id}-user`,
       createdAt: new Date(turn.created_at),
+      metadata: {},
+      attachments: [],
     });
   }
 
@@ -47,6 +49,8 @@ const convertTurnToMessages = (turn: Turn): ThreadMessageLike[] => {
       content: [{ type: "text", text: turn.assistant_content }],
       id: `${turn.id}-assistant`,
       createdAt: new Date(turn.created_at),
+      status: { type: "complete" },
+      metadata: {},
     });
   }
 
@@ -129,6 +133,8 @@ export function FounderOSRuntimeProvider({
         content: [{ type: "text", text: input }],
         id: `temp-user-${Date.now()}`,
         createdAt: new Date(),
+        metadata: {},
+        attachments: [],
       };
       setMessages((prev) => [...prev, tempUserMessage]);
 
