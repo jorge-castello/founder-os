@@ -18,6 +18,7 @@ class Session(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     title: Mapped[str | None] = mapped_column(String(255))
     status: Mapped[str] = mapped_column(String(20), default="active")
+    claude_session_id: Mapped[str | None] = mapped_column(String(255))  # Claude's internal session ID for resume
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
