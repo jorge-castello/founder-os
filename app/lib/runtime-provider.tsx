@@ -123,76 +123,137 @@ function RuntimeProviderInner({
       }
 
       const input = textContent.text;
+      const timestamp = Date.now();
+      const userMessageId = `user-${timestamp}`;
+      const assistantMessageId = `assistant-${timestamp}`;
 
-      // Optimistically add user message
-      const tempUserMessage: ThreadMessageLike = {
+      // Add user message
+      const userMessage: ThreadMessageLike = {
         role: "user",
         content: [{ type: "text", text: input }],
-        id: `temp-user-${Date.now()}`,
+        id: userMessageId,
         createdAt: new Date(),
         metadata: {},
         attachments: [],
       };
-      setMessages((prev) => [...prev, tempUserMessage]);
+      setMessages((prev) => [...prev, userMessage]);
 
-      // Show loading state
+      // Add placeholder assistant message (streaming)
+      const assistantMessage: ThreadMessageLike = {
+        role: "assistant",
+        content: [{ type: "text", text: "" }],
+        id: assistantMessageId,
+        createdAt: new Date(),
+        status: { type: "running" },
+        metadata: {},
+      };
+      setMessages((prev) => [...prev, assistantMessage]);
       setIsRunning(true);
 
-      try {
-        // Send to backend
-        const turn = await sendMessage(sessionId, input);
+      // Track accumulated text for streaming
+      let accumulatedText = "";
 
-        // Replace temp message with real messages from the turn
-        setMessages((prev) => {
-          // Remove temp message
-          const withoutTemp = prev.filter((m) => m.id !== tempUserMessage.id);
-          // Add the real messages
-          return [...withoutTemp, ...convertTurnToMessages(turn)];
+      try {
+        // Subscribe to SSE stream BEFORE sending message
+        const eventSource = new EventSource(
+          `${API_BASE}/sessions/${sessionId}/stream?last_id=$`
+        );
+
+        // Handle streaming events
+        eventSource.addEventListener("text_delta", (event) => {
+          const data = JSON.parse(event.data);
+          accumulatedText += data.content;
+
+          // Update assistant message with new text
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantMessageId
+                ? {
+                    ...m,
+                    content: [{ type: "text", text: accumulatedText }],
+                  }
+                : m
+            )
+          );
         });
+
+        eventSource.addEventListener("text", (event) => {
+          const data = JSON.parse(event.data);
+          // Final text - update and mark complete
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantMessageId
+                ? {
+                    ...m,
+                    content: [{ type: "text", text: data.content }],
+                    status: { type: "complete", reason: "stop" },
+                  }
+                : m
+            )
+          );
+          eventSource.close();
+          setIsRunning(false);
+        });
+
+        eventSource.onerror = () => {
+          eventSource.close();
+          setIsRunning(false);
+        };
+
+        // Send message to backend (this triggers Claude response)
+        await sendMessage(sessionId, input);
       } catch (error) {
         console.error("Failed to send message:", error);
-        // Remove optimistic message on error
-        setMessages((prev) => prev.filter((m) => m.id !== tempUserMessage.id));
-        throw error;
-      } finally {
+        // Mark as error
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantMessageId
+              ? {
+                  ...m,
+                  content: [{ type: "text", text: "Error: Failed to get response" }],
+                  status: { type: "incomplete", reason: "error" },
+                }
+              : m
+          )
+        );
         setIsRunning(false);
+        throw error;
       }
     },
     [sessionId, setMessages]
   );
 
-  // Memoize threads array to prevent reference changes on every render
+  // Build threads array from sessions
   const threads = useMemo(
     () =>
       sessions.map((s) => ({
         id: s.id,
-        threadId: s.id,
         title: s.title || "New Chat",
         status: "regular" as const,
       })),
     [sessions]
   );
 
-  // Memoize thread list adapter
-  const threadListAdapter: ExternalStoreThreadListAdapter = useMemo(
-    () => ({
-      threadId: sessionId,
-      threads,
-      archivedThreads: [],
+  // Create thread list adapter - spread threads to ensure new array reference
+  // This works around a bug in assistant-ui where the runtime's _threads
+  // doesn't get initialized on construction due to reference comparison
+  const threadListAdapter: ExternalStoreThreadListAdapter = {
+    threadId: sessionId,
+    threads: [...threads], // Spread to create new reference each render
+    archivedThreads: [],
+    isLoading: false,
 
-      onSwitchToNewThread: async () => {
-        const newSession = await createSession();
-        setSessions((prev) => [newSession, ...prev]);
-        setMessages([]);
-        await loadSession(newSession.id);
-      },
+    onSwitchToNewThread: async () => {
+      const newSession = await createSession();
+      setSessions((prev) => [newSession, ...prev]);
+      setMessages([]);
+      await loadSession(newSession.id);
+    },
 
-      onSwitchToThread: async (threadId: string) => {
-        await loadSession(threadId);
-      },
-    }),
-    [sessionId, threads, setSessions, setMessages, loadSession]
-  );
+    onSwitchToThread: async (threadId: string) => {
+      await loadSession(threadId);
+    },
+  };
 
   const runtime = useExternalStoreRuntime({
     isRunning,

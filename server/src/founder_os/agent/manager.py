@@ -60,6 +60,7 @@ class SessionManager:
             setting_sources=["project"],  # Loads CLAUDE.md
             system_prompt={"type": "preset", "preset": "claude_code"},
             resume=claude_session_id,  # Resume from Claude's session if provided
+            include_partial_messages=True,  # Enable streaming partial text
         )
 
     def _is_expired(self, session: ActiveSession) -> bool:
@@ -121,7 +122,8 @@ class SessionManager:
             claude_session_id: Claude's session ID for resume (if we have one stored)
 
         Emits events to Redis stream as Claude responds:
-        - text: TextBlock content
+        - text_delta: Incremental text as it streams
+        - text: Final complete TextBlock content
         - tool_call: ToolUseBlock (tool name and input)
         - tool_result: ToolResultBlock (tool output)
 
@@ -133,19 +135,37 @@ class SessionManager:
 
         await client.query(prompt)
 
-        text_parts: list[str] = []
+        # Track accumulated text per block ID to compute deltas
+        accumulated_text: dict[str, str] = {}
+        final_text_parts: list[str] = []
         result_session_id: str | None = None
 
-        async for message in client.receive_response():
+        # Use receive_messages() instead of receive_response() to get partial updates
+        async for message in client.receive_messages():
+            msg_type = type(message).__name__
+
+            # Handle StreamEvent for real-time streaming deltas
+            if msg_type == "StreamEvent":
+                event = message.event
+                if event.get("type") == "content_block_delta":
+                    delta = event.get("delta", {})
+                    if delta.get("type") == "text_delta":
+                        text_chunk = delta.get("text", "")
+                        if text_chunk:
+                            await event_stream.publish(
+                                session_id,
+                                "text_delta",
+                                {"content": text_chunk},
+                            )
+                continue
+
             if isinstance(message, AssistantMessage):
                 for block in message.content:
                     if isinstance(block, TextBlock):
-                        text_parts.append(block.text)
-                        await event_stream.publish(
-                            session_id,
-                            "text",
-                            {"content": block.text},
-                        )
+                        # Store final accumulated text (don't publish delta here, StreamEvent handles it)
+                        block_id = getattr(block, 'id', 'default')
+                        accumulated_text[block_id] = block.text
+
                     elif isinstance(block, ToolUseBlock):
                         await event_stream.publish(
                             session_id,
@@ -168,8 +188,19 @@ class SessionManager:
                         )
             elif isinstance(message, ResultMessage):
                 result_session_id = message.session_id
+                # ResultMessage indicates completion - break out of loop
+                break
 
-        return "".join(text_parts), result_session_id or ""
+        # Emit final complete text and collect for return
+        for block_id, text in accumulated_text.items():
+            final_text_parts.append(text)
+            await event_stream.publish(
+                session_id,
+                "text",
+                {"content": text},
+            )
+
+        return "".join(final_text_parts), result_session_id or ""
 
     async def cleanup_expired(self) -> int:
         """Remove expired clients. Returns count removed."""
