@@ -47,7 +47,11 @@ class SessionManager:
         self._lock = asyncio.Lock()
 
     def _create_options(self, session_id: str) -> ClaudeAgentOptions:
-        """Create SDK options for a session."""
+        """Create SDK options for a session.
+
+        Note: Multi-turn context is maintained by reusing the same ClaudeSDKClient
+        instance across queries (handled by SessionManager).
+        """
         return ClaudeAgentOptions(
             cwd=REPO_ROOT,
             mcp_servers=REPO_ROOT / "mcp.json",
