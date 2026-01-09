@@ -23,7 +23,11 @@ router = APIRouter(prefix="/sessions", tags=["sessions"])
 
 
 class SessionCreate(BaseModel):
-    title: str | None = None  # TODO: Auto-generate from first message
+    title: str | None = None
+
+
+class SessionUpdate(BaseModel):
+    title: str | None = None
 
 
 class TurnResponse(BaseModel):
@@ -109,6 +113,26 @@ async def get_session_detail(
     return session
 
 
+@router.patch("/{session_id}", response_model=SessionResponse)
+async def update_session(
+    session_id: str,
+    data: SessionUpdate,
+    db: AsyncSession = Depends(get_session),
+) -> Session:
+    """Update a session (e.g., title)."""
+    result = await db.execute(select(Session).where(Session.id == session_id))
+    session = result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if data.title is not None:
+        session.title = data.title
+
+    await db.commit()
+    await db.refresh(session)
+    return session
+
+
 @router.post("/{session_id}/turns", response_model=TurnMessageResponse)
 async def create_turn(
     session_id: str,
@@ -169,3 +193,63 @@ async def stream_session(
             }
 
     return EventSourceResponse(event_generator())
+
+
+class TitleResponse(BaseModel):
+    title: str
+
+
+@router.post("/{session_id}/generate-title", response_model=TitleResponse)
+async def generate_title(
+    session_id: str,
+    db: AsyncSession = Depends(get_session),
+) -> dict:
+    """Generate a title for a session based on its conversation."""
+    import anthropic
+
+    # Get session with turns
+    result = await db.execute(
+        select(Session)
+        .where(Session.id == session_id)
+        .options(selectinload(Session.turns))
+    )
+    session = result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if not session.turns:
+        raise HTTPException(status_code=400, detail="Session has no messages")
+
+    # Build conversation summary for title generation
+    conversation = []
+    for turn in session.turns[:3]:  # Use first 3 turns max
+        if turn.user_content:
+            conversation.append(f"User: {turn.user_content[:200]}")
+        if turn.assistant_content:
+            conversation.append(f"Assistant: {turn.assistant_content[:200]}")
+
+    conversation_text = "\n".join(conversation)
+
+    # Call Claude to generate title
+    client = anthropic.Anthropic()
+    message = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=50,
+        messages=[
+            {
+                "role": "user",
+                "content": f"""Generate a short, descriptive title (3-6 words) for this conversation. Return only the title, no quotes or extra text.
+
+Conversation:
+{conversation_text}""",
+            }
+        ],
+    )
+
+    title = message.content[0].text.strip()
+
+    # Update session title
+    session.title = title
+    await db.commit()
+
+    return {"title": title}

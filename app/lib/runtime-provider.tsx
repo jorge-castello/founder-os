@@ -94,6 +94,16 @@ async function sendMessage(
   return response.json();
 }
 
+async function generateTitle(sessionId: string): Promise<string> {
+  const response = await fetch(
+    `${API_BASE}/sessions/${sessionId}/generate-title`,
+    { method: "POST" }
+  );
+  if (!response.ok) throw new Error("Failed to generate title");
+  const data = await response.json();
+  return data.title;
+}
+
 // Inner component that only renders when we have session data
 function RuntimeProviderInner({
   children,
@@ -268,6 +278,22 @@ function RuntimeProviderInner({
           );
           eventSource.close();
           setIsRunning(false);
+
+          // Generate title if session doesn't have one
+          const currentSession = sessions.find((s) => s.id === sessionId);
+          if (currentSession && !currentSession.title) {
+            generateTitle(sessionId)
+              .then((title) => {
+                setSessions((prev) =>
+                  prev.map((s) =>
+                    s.id === sessionId ? { ...s, title } : s
+                  )
+                );
+              })
+              .catch((err) => {
+                console.error("Failed to generate title:", err);
+              });
+          }
         });
 
         eventSource.onerror = () => {
@@ -295,7 +321,7 @@ function RuntimeProviderInner({
         throw error;
       }
     },
-    [sessionId, setMessages]
+    [sessionId, sessions, setMessages, setSessions]
   );
 
   // Build threads array from sessions

@@ -79,3 +79,34 @@ async def test_get_session_not_found(client):
 
     assert response.status_code == 404
     assert response.json()["detail"] == "Session not found"
+
+
+@pytest.mark.asyncio
+async def test_update_session_title(client):
+    """PATCH /sessions/{id} should update session title."""
+    # Create session
+    create_response = await client.post("/sessions", json={})
+    session_id = create_response.json()["id"]
+    assert create_response.json()["title"] is None
+
+    # Update title
+    response = await client.patch(
+        f"/sessions/{session_id}",
+        json={"title": "Updated Title"}
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["title"] == "Updated Title"
+
+
+@pytest.mark.asyncio
+async def test_update_session_not_found(client):
+    """PATCH /sessions/{id} should return 404 for invalid ID."""
+    response = await client.patch(
+        "/sessions/nonexistent-id",
+        json={"title": "Test"}
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Session not found"
