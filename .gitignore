@@ -20,6 +20,9 @@ __pycache__/
 dist/
 build/
 
+# Database
+server/data/
+
 # Node (for future PWA)
 node_modules/
 .next/
