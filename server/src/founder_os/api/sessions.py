@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from founder_os.db import Session, get_session
+from founder_os.db import Session, Turn, get_session
 from founder_os.agent import session_manager
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
@@ -110,7 +110,7 @@ async def create_turn(
     session_id: str,
     data: TurnCreate,
     db: AsyncSession = Depends(get_session),
-) -> dict:
+) -> Turn:
     """Send a message and get Claude's response."""
     # Verify session exists
     result = await db.execute(select(Session).where(Session.id == session_id))
@@ -121,9 +121,15 @@ async def create_turn(
     # Send to Claude and get response
     assistant_content = await session_manager.send_message(session_id, data.content)
 
-    # Return response (persistence added in Step 6)
-    return {
-        "id": str(uuid4()),
-        "user_content": data.content,
-        "assistant_content": assistant_content,
-    }
+    # Save turn to database
+    turn = Turn(
+        id=str(uuid4()),
+        session_id=session_id,
+        user_content=data.content,
+        assistant_content=assistant_content,
+    )
+    db.add(turn)
+    await db.commit()
+    await db.refresh(turn)
+
+    return turn
