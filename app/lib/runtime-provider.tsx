@@ -160,42 +160,40 @@ function RuntimeProviderInner({
       setMessages((prev) => [...prev, assistantMessage]);
       setIsRunning(true);
 
-      // Track accumulated text and tool calls for streaming
-      let accumulatedText = "";
-      interface ToolCallState {
-        toolCallId: string;
-        toolName: string;
-        args: Record<string, string | number | boolean | null>;
-        argsText: string;
-        result?: string | number | boolean | null | Record<string, unknown>;
-        isError?: boolean;
-      }
-      const toolCalls: Map<string, ToolCallState> = new Map();
+      // Track content items in arrival order (text and tool calls interleaved)
+      type ContentItem =
+        | { type: "text"; text: string }
+        | {
+            type: "tool-call";
+            toolCallId: string;
+            toolName: string;
+            args: Record<string, string | number | boolean | null>;
+            argsText: string;
+            result?: string | number | boolean | null | Record<string, unknown>;
+            isError?: boolean;
+          };
+      const contentItems: ContentItem[] = [];
+      let currentTextIndex: number | null = null; // Track current text block for streaming
 
-      // Helper to build content array from accumulated state
+      // Helper to build content array from ordered items
       const buildContent = (): ThreadMessageLike["content"] => {
-        const content: Array<
-          | { type: "text"; text: string }
-          | { readonly type: "tool-call"; readonly toolCallId: string; readonly toolName: string; readonly args: Record<string, string | number | boolean | null>; readonly argsText: string; readonly result?: string | number | boolean | null | Record<string, unknown>; readonly isError?: boolean }
-        > = [];
-
-        if (accumulatedText) {
-          content.push({ type: "text", text: accumulatedText });
+        if (contentItems.length === 0) {
+          return [{ type: "text" as const, text: "" }];
         }
-
-        for (const tc of toolCalls.values()) {
-          content.push({
+        return contentItems.map((item) => {
+          if (item.type === "text") {
+            return { type: "text" as const, text: item.text };
+          }
+          return {
             type: "tool-call" as const,
-            toolCallId: tc.toolCallId,
-            toolName: tc.toolName,
-            args: tc.args,
-            argsText: tc.argsText,
-            result: tc.result,
-            isError: tc.isError,
-          } as const);
-        }
-
-        return content.length > 0 ? content : [{ type: "text" as const, text: "" }];
+            toolCallId: item.toolCallId,
+            toolName: item.toolName,
+            args: item.args,
+            argsText: item.argsText,
+            result: item.result,
+            isError: item.isError,
+          } as const;
+        });
       };
 
       try {
@@ -207,7 +205,17 @@ function RuntimeProviderInner({
         // Handle streaming events
         eventSource.addEventListener("text_delta", (event) => {
           const data = JSON.parse(event.data);
-          accumulatedText += data.content;
+
+          // Append to current text block or create new one
+          if (
+            currentTextIndex !== null &&
+            contentItems[currentTextIndex]?.type === "text"
+          ) {
+            (contentItems[currentTextIndex] as { type: "text"; text: string }).text += data.content;
+          } else {
+            currentTextIndex = contentItems.length;
+            contentItems.push({ type: "text", text: data.content });
+          }
 
           // Update assistant message with new content
           setMessages((prev) =>
@@ -224,7 +232,12 @@ function RuntimeProviderInner({
           const data = JSON.parse(event.data);
           // data: { id, name, input }
           const input = data.input || {};
-          toolCalls.set(data.id, {
+
+          // Reset text index - next text will be a new block after this tool call
+          currentTextIndex = null;
+
+          contentItems.push({
+            type: "tool-call",
             toolCallId: data.id,
             toolName: data.name,
             args: input as Record<string, string | number | boolean | null>,
@@ -245,10 +258,14 @@ function RuntimeProviderInner({
         eventSource.addEventListener("tool_result", (event) => {
           const data = JSON.parse(event.data);
           // data: { tool_use_id, content, is_error }
-          const existing = toolCalls.get(data.tool_use_id);
-          if (existing) {
-            existing.result = data.content;
-            existing.isError = data.is_error;
+          // Find the tool call by ID and update it
+          const toolCall = contentItems.find(
+            (item) =>
+              item.type === "tool-call" && item.toolCallId === data.tool_use_id
+          );
+          if (toolCall && toolCall.type === "tool-call") {
+            toolCall.result = data.content;
+            toolCall.isError = data.is_error;
           }
 
           // Update assistant message with tool result
@@ -263,8 +280,22 @@ function RuntimeProviderInner({
 
         eventSource.addEventListener("text", (event) => {
           const data = JSON.parse(event.data);
-          accumulatedText = data.content;
-          // Final text - update and mark complete
+
+          // Final text - if there's content, ensure it's captured
+          // This replaces the accumulated text with final version
+          if (data.content) {
+            // Find last text item or create one
+            const lastTextIndex = contentItems.findLastIndex(
+              (item) => item.type === "text"
+            );
+            if (lastTextIndex >= 0) {
+              (contentItems[lastTextIndex] as { type: "text"; text: string }).text = data.content;
+            } else {
+              contentItems.push({ type: "text", text: data.content });
+            }
+          }
+
+          // Mark complete
           setMessages((prev) =>
             prev.map((m) =>
               m.id === assistantMessageId

@@ -146,6 +146,17 @@ async def create_turn(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
+    # Create turn immediately with user content (assistant_content will be updated later)
+    turn = Turn(
+        id=str(uuid4()),
+        session_id=session_id,
+        user_content=data.content,
+        assistant_content=None,
+    )
+    db.add(turn)
+    await db.commit()
+    await db.refresh(turn)
+
     # Send to Claude (pass stored claude_session_id for resume if available)
     assistant_content, claude_session_id = await session_manager.send_message(
         session_id, data.content, session.claude_session_id
@@ -155,14 +166,8 @@ async def create_turn(
     if claude_session_id and session.claude_session_id != claude_session_id:
         session.claude_session_id = claude_session_id
 
-    # Save turn to database
-    turn = Turn(
-        id=str(uuid4()),
-        session_id=session_id,
-        user_content=data.content,
-        assistant_content=assistant_content,
-    )
-    db.add(turn)
+    # Update turn with assistant response
+    turn.assistant_content = assistant_content
     await db.commit()
     await db.refresh(turn)
 
