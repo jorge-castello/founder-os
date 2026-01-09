@@ -3,14 +3,18 @@
 from datetime import datetime
 from uuid import uuid4
 
+import json
+
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
+from sse_starlette.sse import EventSourceResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from founder_os.db import Session, Turn, get_session
 from founder_os.agent import session_manager
+from founder_os.stream import event_stream
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
@@ -133,3 +137,29 @@ async def create_turn(
     await db.refresh(turn)
 
     return turn
+
+
+@router.get("/{session_id}/stream")
+async def stream_session(
+    session_id: str,
+    last_id: str = "0",
+) -> EventSourceResponse:
+    """
+    Stream events for a session via Server-Sent Events.
+
+    Args:
+        session_id: Session to stream
+        last_id: Resume from this event ID ("0" for all history, "$" for new only)
+    """
+
+    async def event_generator():
+        async for event_id, event_type, data in event_stream.subscribe(
+            session_id, last_id=last_id
+        ):
+            yield {
+                "event": event_type,
+                "id": event_id,
+                "data": json.dumps(data),
+            }
+
+    return EventSourceResponse(event_generator())
